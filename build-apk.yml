@@ -1,0 +1,88 @@
+name: Build WALL STREET 2.0 APK
+"on":
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Locate complete version 2.0 project
+        id: project
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, shutil, zipfile
+          repo = pathlib.Path(os.environ['GITHUB_WORKSPACE'])
+          temp = pathlib.Path(os.environ['RUNNER_TEMP'])
+          def candidates(root):
+              for p in root.rglob('package.json'):
+                  d = p.parent
+                  if any(part in {'.git', 'node_modules', 'android'} for part in d.relative_to(root).parts):
+                      continue
+                  if not all((d / f).is_file() for f in ['src/main.tsx', 'src/components/Tutorial.tsx', 'src/components/ResultScreen.tsx', 'package-lock.json', 'capacitor.config.json', 'index.html']):
+                      continue
+                  if json.loads(p.read_text(encoding='utf-8')).get('version') == '2.0.0':
+                      yield d
+          roots = list(candidates(repo))
+          if not roots:
+              for i, archive in enumerate(sorted(repo.rglob('WALL_STREET*.zip'))):
+                  target = temp / f'ws-source-{i}'
+                  target.mkdir()
+                  with zipfile.ZipFile(archive) as z:
+                      for name in z.namelist():
+                          if not (target / name).resolve().is_relative_to(target.resolve()):
+                              raise SystemExit('Unsafe archive path')
+                      z.extractall(target)
+                  roots.extend(candidates(target))
+          if len(roots) != 1:
+              raise SystemExit(f'Expected one complete WALL STREET 2.0 project; found {len(roots)}. Upload the full ZIP or the complete extracted project, not partial files.')
+          source = roots[0]
+          work = temp / 'wall-street-build'
+          shutil.copytree(source, work, ignore=shutil.ignore_patterns('.git', '.github', 'node_modules', 'dist', 'android', '*.zip', '*.apk'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'dir={work}\n')
+          print('Complete project:', source)
+          PY
+      - name: Install locked web dependencies
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: npm ci --no-audit --no-fund
+      - name: Type-check and compile game
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          npm run build
+          test -s dist/index.html
+          grep -rq 'career-entry' dist/assets
+      - name: Install Android tooling
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          npm install --no-save --package-lock=false --no-audit --no-fund @capacitor/core@7 @capacitor/cli@7 @capacitor/android@7
+          sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Generate Android app
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          npx --no-install cap add android
+          npx --no-install cap sync android
+      - name: Assemble installable APK
+        working-directory: ${{ steps.project.outputs.dir }}/android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/WALL_STREET_2.0.apk"
+          test -s "$RUNNER_TEMP/WALL_STREET_2.0.apk"
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: WALL_STREET_2.0_ANDROID
+          path: ${{ runner.temp }}/WALL_STREET_2.0.apk
+          if-no-files-found: error
